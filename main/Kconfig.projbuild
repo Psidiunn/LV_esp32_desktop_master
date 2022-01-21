@@ -1,0 +1,16 @@
+menu "Wifi Config"
+
+    config wifi_Name
+        string "Wifi Name"
+        default ""
+    
+    config wifi_Password
+        string "wifi_Password"
+        default ""
+
+    config wifi_choice_City
+        string "choice_City"
+        default ""
+            
+
+endmenu

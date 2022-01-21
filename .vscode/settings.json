@@ -1,0 +1,25 @@
+{
+    "files.associations": {
+        "lvgl.h": "c",
+        "lv_conf_kconfig.h": "c",
+        "esp_http_client.h": "c",
+        "esp_netif.h": "c",
+        "esp_event.h": "c",
+        "tcpip_adapter_types.h": "c",
+        "esp_netif_sta_list.h": "c",
+        "esp_netif_types.h": "c",
+        "esp_netif_net_stack.h": "c",
+        "esp_wifi.h": "c",
+        "esp_wifi_default.h": "c",
+        "esp_system.h": "c",
+        "esp_sntp.h": "c",
+        "stdlib.h": "c",
+        "lv_log.h": "c",
+        "lv_fs.h": "c",
+        "gifdec.h": "c",
+        "lv_gif.h": "c",
+        "lv_arc.h": "c",
+        "random": "c"
+    },
+    "idf.adapterTargetName": "esp32"
+}
