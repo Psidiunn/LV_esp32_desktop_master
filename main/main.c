@@ -15,13 +15,13 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_freertos_hooks.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
 
 
 #include "lvgl.h"
-
 #include "lvgl_helpers.h"
 
 #include "esp_wifi.h"
@@ -35,7 +35,6 @@
 #include "esp_eth.h"
 
 #include "cJSON.h"
-
 
 #include <time.h>
 #include <sys/time.h>
@@ -51,7 +50,6 @@
     #define wifi_password "Hsht68121314"
     #define ChoiceQueryCity "foshan"
 #endif
-
 
 #define USE_BEBUG 1
 #if USE_BEBUG
@@ -78,12 +76,7 @@ typedef struct _weather{
 
 _weather weather;
 
-
-static lv_obj_t *lv_time_label;
-static lv_obj_t *lv_date_label;
-static lv_obj_t *lv_city_label;
-
-static lv_obj_t *lv_logo_img;
+enum bg_color{white=0,black};
 
 uint32_t Refresh_Time_EVENT , Refresh_Weather_EVENT;
 
@@ -93,14 +86,6 @@ const char *WIFI_TAG = "WIFI_TAG";
 /*********************
  *      DEFINES
  *********************/
-#define LV_TICK_PERIOD_MS 1
-#define LV_IMG_Refresh_MS (70/portTICK_PERIOD_MS)
-
-
-LV_FONT_DECLARE(SegFont_40);
-LV_FONT_DECLARE(cityFont_48);
-
-
 
 /**********************
  *  STATIC PROTOTYPES
@@ -112,24 +97,27 @@ static void create_demo_application(void);
 static void wifi_config(void);
 static void API_get_weather(void *pvParameters);
 static void API_get_temp(void *pvParameters);
-static void API_Timeinit(void *pvParameters);
-void API_ShowImg(void *pvParameters);
-
-void API_Refresh_time(void *pvParameter);
 
 static void utc_sntp_init(void);
+
+EventGroupHandle_t xCreatedEventGroup;
+
+#define Refresh_Screen_Flag ( 1 << 0 )
 
 /**********************
  *   APPLICATION MAIN
  **********************/
 void app_main() {
 
+    xCreatedEventGroup = xEventGroupCreate();
+
     /* If you want to use a task to create the graphic, you NEED to create a Pinned task
      * Otherwise there can be problem such as memory corruption and so on.
      * NOTE: When not using Wi-Fi nor Bluetooth you can pin the guiTask to core 0 */
+    xTaskCreatePinnedToCore(guiTask, "gui", 4096*2, NULL, 1, NULL,tskNO_AFFINITY);
+    
     wifi_config();
-    utc_sntp_init();
-    xTaskCreate(guiTask, "gui", 4096*2, NULL, 10, NULL);
+    
 
 }
 
@@ -138,23 +126,7 @@ void app_main() {
  * you should lock on the very same semaphore! */
 SemaphoreHandle_t xGuiSemaphore;
 
-void API_Refresh_time(void *pvParameter)
-{
-    while (1)
-    {
-        /* code */
-        lv_event_send(lv_time_label, Refresh_Time_EVENT, NULL);
-        
-        vTaskDelay(499 / portTICK_RATE_MS);
-
-    }
-}
-
-
-void desktop(void)
-{
-    lv_obj_set_style_bg_color(lv_scr_act(),lv_color_black(),0);
-}
+//static TaskHandle_t lv_RefreshCity_queue = NULL;
 
 static void guiTask(void *pvParameter) {
 
@@ -193,22 +165,22 @@ static void guiTask(void *pvParameter) {
     lv_disp_drv_register(&disp_drv);
 
     /* Create and start a periodic timer interrupt to call lv_tick_inc */
+
     const esp_timer_create_args_t periodic_timer_args = {
         .callback = &lv_tick_task,
         .name = "periodic_gui"
     };
+    
     esp_timer_handle_t periodic_timer;
     ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, LV_TICK_PERIOD_MS * 1000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, portTICK_PERIOD_MS));
 
     /* Create the demo application */
-    desktop();
-    create_demo_application();
-    
 
     while (1) {
-        /* Delay 1 tick (assumes FreeRTOS tick is 10ms */
-        vTaskDelay(pdMS_TO_TICKS(10));
+        xEventGroupWaitBits(xCreatedEventGroup,Refresh_Screen_Flag,pdFALSE,pdFALSE,portMAX_DELAY);
+            /* Delay 1 tick (assumes FreeRTOS tick is 10ms */
+        vTaskDelay(pdMS_TO_TICKS(50));
 
         /* Try to take the semaphore, call lvgl related function on success */
         if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY)) {
@@ -239,9 +211,9 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
             break;
         case IP_EVENT_STA_GOT_IP:
             ESP_LOGI(WIFI_TAG, "成功获取到IP");
-            xTaskCreate(API_Refresh_time,"Refresh_time",4096,NULL, 9, NULL);
-//           xTaskCreate(API_get_weather, "get_weather", 10240, NULL, 5, NULL);
-            xTaskCreate(API_get_temp, "get_temp", 8096, NULL, 5, NULL);
+            utc_sntp_init();
+            create_demo_application();
+//            xTaskCreate(API_get_temp, "API_get_temp", 4096*2, NULL, tskIDLE_PRIORITY, NULL);
             break;
         case SYSTEM_EVENT_STA_DISCONNECTED:
             ESP_LOGI(WIFI_TAG, "SYSTEM_EVENT_STA_DISCONNECTED");
@@ -268,7 +240,7 @@ static void wifi_config(void)
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL,&instance);
 
     ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
+        ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
     wifi_config_t sta_config = {
         .sta = {
             .ssid = wifi_name,
@@ -429,8 +401,9 @@ static void API_get_temp(void *pvParameters)
                 weather.city = cJSON_GetObjectItem(cJSON_GetObjectItem(parent,"location"),"name")->valuestring;
                 weather.temperature = cJSON_GetObjectItem(child,"temperature")->valuestring;
                 DEBUG("城市:%s\n环境温度:%s\n",weather.city,weather.temperature);
-                lv_event_send(lv_city_label, Refresh_Weather_EVENT, NULL);
 
+                /*向API_Show_City(),发送通知，使其解除阻塞状态 */
+//                xTaskNotifyGive( lv_RefreshCity_queue );
             } 
             //如果不成功
             else {
@@ -444,29 +417,6 @@ static void API_get_temp(void *pvParameters)
     //延时
     vTaskDelay(5000/portTICK_PERIOD_MS);
     }
-}
-
-static void API_show_Weather_event_Handler(lv_event_t * e)
-{
-    lv_label_set_text_fmt(lv_city_label,"#00f0f0 %s°#",weather.temperature);
-
-}
-
-void API_Show_Weather(void)
-{
-    /*城市显示函数*/
-    Refresh_Weather_EVENT = lv_event_register_id();
-    lv_city_label = lv_label_create(lv_scr_act());
-    lv_obj_align(lv_city_label, LV_ALIGN_TOP_RIGHT, -10, 10);
-    lv_label_set_recolor(lv_city_label, true);
-    static lv_style_t city_style;
-    lv_style_init(&city_style);
-    lv_style_set_text_font(&city_style,&lv_font_montserrat_44);
-    lv_style_set_text_opa(&city_style,LV_OPA_100);
-    lv_obj_add_style(lv_city_label, &city_style,0);
-
-    lv_label_set_text(lv_city_label,"#00f0f0 00°#");
-    lv_obj_add_event_cb(lv_city_label, API_show_Weather_event_Handler,Refresh_Weather_EVENT,NULL);
 }
 
 void sntp_set_time_sync_callback(struct timeval *tv)
@@ -498,120 +448,298 @@ static void utc_sntp_init(void)
 
     sntp_init();
 }
+/**********************
+ *      界面部分
+ **********************/
 
-static void API_show_time_event_Handler(lv_event_t * e)
+typedef enum _weather_state{
+    day_sunny = 0,
+    day_cloud,
+    day_cloudd,
+    day_rain,
+
+    _day_last
+}weather_state;
+
+uint32_t Refresh_weather_ui;
+
+LV_IMG_DECLARE(sunny);        //图片声明
+LV_IMG_DECLARE(cloud);        //图片声明
+LV_IMG_DECLARE(cloudd);        //图片声明
+LV_IMG_DECLARE(rain);        //图片声明
+
+
+/*背景边框显示函数接口*/
+void API_desktop_Line(void)
+{
+    /*顶部线条，即电量下线条*/
+    static lv_point_t lv_TOP_line_points[] = {{5,20},{235,20}};
+    static lv_obj_t *lv_TOP_line;
+    lv_TOP_line = lv_line_create(lv_scr_act());
+    lv_line_set_points(lv_TOP_line,lv_TOP_line_points,2);
+
+
+    /*城市边框线条*/
+    static lv_point_t lv_CityWeather_line_points[] = {{65,20},{65,100}};
+    static lv_obj_t *lv_CityWeather_line;
+    lv_CityWeather_line = lv_line_create(lv_scr_act());
+    lv_line_set_points(lv_CityWeather_line,lv_CityWeather_line_points,2);
+
+    /*时间边框顶部线条*/
+    static lv_point_t lv_MID_TOP_line_points[] = {{5,100},{235,100}};
+    static lv_obj_t *lv_MID_TOP_line;
+    lv_MID_TOP_line = lv_line_create(lv_scr_act());
+    lv_line_set_points(lv_MID_TOP_line,lv_MID_TOP_line_points,2);
+
+    /*时间边框顶部线条*/
+    static lv_point_t lv_MID_BOTTOM_line_points[] = {{5,180},{235,180}};
+    static lv_obj_t *lv_MID_BOTTOM_line;
+    lv_MID_BOTTOM_line = lv_line_create(lv_scr_act());
+    lv_line_set_points(lv_MID_BOTTOM_line,lv_MID_BOTTOM_line_points,2);
+
+    /*线条统一样式*/
+    static lv_style_t lv_line_style;
+    lv_style_init(&lv_line_style);
+    lv_style_set_line_width(&lv_line_style,1);
+    lv_style_set_line_color(&lv_line_style,lv_color_black());
+    lv_style_set_line_rounded(&lv_line_style,true);
+
+
+    lv_obj_add_style(lv_TOP_line,&lv_line_style,0);
+
+    lv_obj_add_style(lv_MID_TOP_line,&lv_line_style,0);
+
+    lv_obj_add_style(lv_CityWeather_line,&lv_line_style,0);
+}
+
+void API_Energy_UI(void)
+{
+    lv_obj_t *Energy_UI = lv_label_create(lv_scr_act());
+}
+
+/*日期显示函数接口*/
+static void API_Date_Show(void *pvParameters)
 {
     struct tm *t ;
-    static char date[8];
+    time_t tt;
+    
+    lv_obj_t *lv_date_label = lv_label_create(lv_scr_act());
+    lv_obj_align(lv_date_label,LV_ALIGN_TOP_MID,0,1);
+    lv_label_set_text(lv_date_label,"2000-01-01");
+
+    static lv_style_t lv_date_style;
+    lv_style_init(&lv_date_style);
+    lv_style_set_text_font(&lv_date_style,&lv_font_montserrat_16);
+    lv_style_set_text_color(&lv_date_style,lv_color_black());
+    lv_obj_add_style(lv_date_label,&lv_date_style,0);
+
+    while (1)
+    {
+        time(&tt);
+        t=localtime(&tt);
+        lv_label_set_text_fmt(lv_date_label,"%02d-%02d-%02d",t->tm_year+1900,t->tm_mon+1,t->tm_mday);
+        vTaskDelay(699 / portTICK_RATE_MS);
+    }
+}
+
+/*所在城市显示接口*/
+static void API_Show_City(void *pvParameters)
+{
+    (void) pvParameters;
+    
+    LV_FONT_DECLARE(city_30);
+
+    static lv_obj_t *lv_symbol_home;
+    lv_symbol_home = lv_label_create(lv_scr_act());
+    lv_obj_set_pos(lv_symbol_home,5,45);
+    lv_label_set_recolor(lv_symbol_home, true);
+    static lv_style_t lv_symbol_style ;
+    lv_style_init(&lv_symbol_style);
+    lv_style_set_text_font(&lv_symbol_style,&lv_font_montserrat_20);
+    lv_obj_add_style(lv_symbol_home, &lv_symbol_style,0);
+    lv_label_set_text(lv_symbol_home, "#000000 "LV_SYMBOL_HOME"#");
+
+    static lv_obj_t *lv_city_label;
+    lv_city_label = lv_label_create(lv_scr_act());
+    lv_obj_align_to(lv_city_label,lv_symbol_home, LV_ALIGN_OUT_RIGHT_TOP,2, -20);
+    lv_label_set_recolor(lv_city_label, true);
+    static lv_style_t lv_city_style ;
+    lv_style_init(&lv_city_style);
+    lv_style_set_text_font(&lv_city_style,&city_30);
+    lv_obj_add_style(lv_city_label, &lv_city_style,0);
+    lv_label_set_text(lv_city_label, "#0000ff 佛#\n#0000ff 山#");
+
+    while (1)
+    {
+//        ulTaskNotifyTake( pdTRUE, portMAX_DELAY);
+        printf("1\n");
+//        lv_label_set_text_fmt(lv_city_label,"%s",weather.city);
+        vTaskDelay(999 / portTICK_RATE_MS);
+    }
+    
+}
+
+/*天气状态回调函数*/
+static void API_Wearther_UI_CB(lv_event_t * event)
+{
+    lv_obj_t *Weather_ui_img = event->current_target;
+    uint16_t UI_choice = *(uint16_t*)(lv_event_get_param(event));
+    printf("%d\n",UI_choice);
+    switch(UI_choice)
+    {
+        case day_sunny:
+            lv_img_set_src(Weather_ui_img,&sunny);      /*晴朗*/
+        break;
+        case day_cloud:
+            lv_img_set_src(Weather_ui_img,&cloud);      /*多云*/
+        break;
+        case day_cloudd:
+            lv_img_set_src(Weather_ui_img,&cloudd);     /*阴天*/
+        break;
+        case day_rain:
+            lv_img_set_src(Weather_ui_img,&rain);       /*下雨*/
+        break;
+        default:
+            break;
+    }
+}
+
+/*天气状态显示接口*/
+void API_Weather_UI(void)
+{
+    uint16_t UI_choice = day_rain;
+    Refresh_weather_ui = lv_event_register_id();
+
+    lv_obj_t *weather_ui_img = lv_img_create(lv_scr_act());
+    lv_img_set_src(weather_ui_img,&sunny);
+    lv_obj_align(weather_ui_img,LV_ALIGN_TOP_MID,-20,30);
+
+    lv_obj_add_event_cb(weather_ui_img,&API_Wearther_UI_CB,Refresh_weather_ui,NULL);
+
+    lv_event_send(weather_ui_img,Refresh_weather_ui,&UI_choice);     //回响函数调用，初始化为晴朗
+}
+
+/*当天温度区间显示接口*/
+void API_TempRange_Show(void)
+{
+    /*温度区间显示*/
+    lv_obj_t *lv_TempRange_label = lv_label_create(lv_scr_act());
+    lv_obj_align(lv_TempRange_label,LV_ALIGN_TOP_MID,-16,75);
+    lv_label_set_recolor(lv_TempRange_label,true);
+
+    static lv_style_t lv_TempRange_style ;
+    lv_style_init(&lv_TempRange_style);
+    lv_style_set_text_font(&lv_TempRange_style,&lv_font_montserrat_16);
+    lv_obj_add_style(lv_TempRange_label, &lv_TempRange_style,0);
+
+    lv_label_set_text(lv_TempRange_label,"#111111 10~20°C#");
+
+}
+
+/*当前温度显示函数接口*/
+void API_TempAndHumi_Show(void)
+{
+    LV_IMG_DECLARE(temp_icon);        //温度图标声明
+    LV_IMG_DECLARE(humi_icon);        //湿度图标声明
+
+    /*温度图标显示*/
+    lv_obj_t *lv_temp_UI_img = lv_img_create(lv_scr_act());
+    lv_obj_align(lv_temp_UI_img,LV_ALIGN_TOP_MID,45,25);
+    lv_img_set_src(lv_temp_UI_img,&temp_icon);
+
+    /*目前温度显示*/
+    lv_obj_t *lv_temp_label = lv_label_create(lv_scr_act());
+    lv_obj_align_to(lv_temp_label,lv_temp_UI_img,LV_ALIGN_OUT_RIGHT_TOP,2,5);
+    lv_label_set_text(lv_temp_label,": 15°C");
+
+    /*湿度图标显示*/
+    lv_obj_t *lv_humi_UI_img = lv_img_create(lv_scr_act());
+    lv_obj_align(lv_humi_UI_img,LV_ALIGN_TOP_MID,45,65);
+    lv_img_set_src(lv_humi_UI_img,&humi_icon);
+
+    /*目前湿度显示*/
+    lv_obj_t *lv_humi_label = lv_label_create(lv_scr_act());
+    lv_obj_align_to(lv_humi_label,lv_humi_UI_img,LV_ALIGN_OUT_RIGHT_TOP,2,5);
+    lv_label_set_text(lv_humi_label,": 80%%");
+
+    /*温度与湿度字体样式*/
+    static lv_style_t lv_TempAndHumi_style;
+    lv_style_init(&lv_TempAndHumi_style);
+    lv_style_set_text_font(&lv_TempAndHumi_style,&lv_font_montserrat_20);
+    lv_style_set_text_color(&lv_TempAndHumi_style,lv_color_black());
+
+    lv_obj_add_style(lv_temp_label, &lv_TempAndHumi_style,0);
+    lv_obj_add_style(lv_humi_label, &lv_TempAndHumi_style,0);
+}
+
+void API_Time_Show(void *pvParameters)
+{
+    struct tm *t ;
     static bool time_poll = 0;
     time_t tt;
-    time(&tt);
-    t=localtime(&tt);
-    if(time_poll == 0)
-    {
-        lv_label_set_text_fmt(lv_time_label,"#ff0000 %02d:%02d#",t->tm_hour,t->tm_min);
-        lv_label_set_text_fmt(lv_date_label,"#fff000 %04d/%02d/%02d#",t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
-        strftime(date,sizeof (date),"%A",t);
-        printf("%s\n",date);
-        time_poll = 1;
-    }
-    else
-    {
-        lv_label_set_text_fmt(lv_time_label,"#ff0000 %02d %02d#",t->tm_hour,t->tm_min);
-        time_poll = 0;
-    }
+    
+    LV_FONT_DECLARE(SEG_Font_60);
 
+    lv_obj_t * lv_time_label = lv_label_create(lv_scr_act());
+    lv_obj_align(lv_time_label,LV_ALIGN_CENTER,0,20);
+    lv_label_set_text(lv_time_label,"00:00");
+
+    static lv_style_t lv_time_style;
+    lv_style_init(&lv_time_style);
+    lv_style_set_text_font(&lv_time_style,&SEG_Font_60);
+    lv_style_set_text_color(&lv_time_style,lv_color_make(255,0,0));
+    lv_obj_add_style(lv_time_label,&lv_time_style,0);
+
+    while (1)
+    {
+        time(&tt);
+        t=localtime(&tt);
+        if(time_poll == 0)
+        {
+            lv_label_set_text_fmt(lv_time_label,"%02d:%02d",t->tm_hour,t->tm_min);
+            time_poll = 1;
+        }
+        else
+        {
+            lv_label_set_text_fmt(lv_time_label,"%02d %02d",t->tm_hour,t->tm_min);
+            time_poll = 0;
+        }
+        vTaskDelay(499 / portTICK_RATE_MS);
+    }
 }
 
-static void API_show_time(void)
-{  
-    /*时间显示创建*/
-    Refresh_Time_EVENT = lv_event_register_id();
-    lv_time_label = lv_label_create(lv_scr_act());
-    lv_obj_set_pos(lv_time_label,5,10);
-    lv_label_set_recolor(lv_time_label, true);
-    static lv_style_t style ;
-    static lv_style_t data_style ;
-    lv_style_init(&style);
-    lv_style_set_text_font(&style,&SegFont_40);
-    lv_obj_add_style(lv_time_label, &style,0);
-    lv_label_set_text(lv_time_label,"#ff0000 00:00#");
-
-    lv_obj_add_event_cb(lv_time_label, API_show_time_event_Handler,Refresh_Time_EVENT,NULL);
-
-    /*日期显示创建*/
-    lv_date_label =lv_label_create(lv_scr_act());
-//    lv_obj_set_pos(lv_date_lable,5,lv_obj_get_x());
-    lv_obj_align_to(lv_date_label,lv_time_label,LV_ALIGN_OUT_BOTTOM_LEFT,12,5);
-    lv_label_set_recolor(lv_date_label,true);
-    lv_style_set_text_font(&data_style,&lv_font_montserrat_20);
-    lv_obj_add_style(lv_date_label, &data_style,0);
-    lv_label_set_text(lv_date_label,"#fff000 0000/00/00#");
-}
-
-void API_ShowImg(void *pvParameters)
+/*动态图片显示接口*/
+void API_Show_GIF(void)
 {
-    LV_IMG_DECLARE(SPACE_1);LV_IMG_DECLARE(SPACE_2);LV_IMG_DECLARE(SPACE_3);LV_IMG_DECLARE(SPACE_4);LV_IMG_DECLARE(SPACE_5);
-    LV_IMG_DECLARE(SPACE_6);LV_IMG_DECLARE(SPACE_7);LV_IMG_DECLARE(SPACE_8);LV_IMG_DECLARE(SPACE_9);LV_IMG_DECLARE(SPACE_10);
-    LV_IMG_DECLARE(SPACE_11);LV_IMG_DECLARE(SPACE_12);LV_IMG_DECLARE(SPACE_13);LV_IMG_DECLARE(SPACE_14);LV_IMG_DECLARE(SPACE_15);
-    LV_IMG_DECLARE(SPACE_16);LV_IMG_DECLARE(SPACE_17);LV_IMG_DECLARE(SPACE_18);
+    LV_IMG_DECLARE(hit);
+    lv_obj_t * img;
 
-    lv_logo_img = lv_img_create(lv_scr_act());
-    lv_img_set_src(lv_logo_img, &SPACE_1);
-    lv_obj_align(lv_logo_img, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-
-    while(1)
-    {
-        lv_img_set_src(lv_logo_img, &SPACE_1);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_2);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_3);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_4);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_5);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_6);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_7);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_8);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_9);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_10);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_11);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_12);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_13);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_14);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_15);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_16);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_17);
-        vTaskDelay(LV_IMG_Refresh_MS);
-        lv_img_set_src(lv_logo_img, &SPACE_18);
-        vTaskDelay(LV_IMG_Refresh_MS);
-
-    }
+    img = lv_gif_create(lv_scr_act());
+    lv_gif_set_src(img, &hit);
+    lv_obj_align(img, LV_ALIGN_BOTTOM_LEFT, 3, -8);
 }
 
 static void create_demo_application(void)
 {
+    API_Show_GIF();
+    API_desktop_Line();
+    API_Weather_UI();   
+    API_TempRange_Show();
 
-    API_Show_Weather();
-    API_show_time();
-//    xTaskCreate(API_ShowImg,"ShowImg",4096,NULL, 9, NULL);
+//    API_TempAndHumi_Show();
+    xTaskCreatePinnedToCore(API_Show_City,"API_Show_City",4096,NULL, 10, NULL,tskNO_AFFINITY);  
+
+
+    xTaskCreatePinnedToCore(API_Date_Show,"API_Date_Show",4096,NULL, 11, NULL,tskNO_AFFINITY);  
+    xTaskCreatePinnedToCore(API_Time_Show,"API_Time_Show",4096,NULL, 12, NULL,tskNO_AFFINITY);  
+    xEventGroupSetBits(xCreatedEventGroup,Refresh_Screen_Flag);
+
+//    xEventGroupClearBits(xCreatedEventGroup,Refresh_Screen_Flag);
+
 }
 
 static void lv_tick_task(void *arg) {
     (void) arg;
+    lv_tick_inc(1);
 
-    lv_tick_inc(LV_TICK_PERIOD_MS);
 }
